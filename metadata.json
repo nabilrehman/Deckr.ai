@@ -1,0 +1,5 @@
+{
+  "name": "deckhero",
+  "description": "Upload your sales deck slides and use text prompts to edit the images with Gemini's powerful AI capabilities. Edit architecture diagrams, change logos, or apply creative filters seamlessly.",
+  "requestFramePermissions": []
+}
