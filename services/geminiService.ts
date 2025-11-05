@@ -11,22 +11,10 @@ export interface BoundingBox {
   height: number;
 }
 
-export interface ContentBlock {
-  id: number;
-  title: string;
-  content: string[];
-  box: BoundingBox;
+export interface TextReplacement {
+    originalText: string;
+    newText: string;
 }
-
-export interface EditingPlan {
-  action: 'rearrange-and-remove' | 'generative-edit';
-  targets?: number[]; // IDs of blocks to remove
-  contentBlocks?: ContentBlock[];
-  slideTitle?: { text: string; box: BoundingBox };
-  refinedPrompt?: string; // For generative edits
-  sources: any[];
-}
-
 
 const fileToGenerativePart = (base64Data: string) => {
     const match = base64Data.match(/^data:(image\/\w+);base64,(.*)$/);
@@ -124,64 +112,98 @@ export const compositeImage = async (baseImage: string, overlayImage: string, pr
     return generateSingleImage('gemini-2.5-flash-image', [baseImagePart, overlayImagePart, textPart], { responseModalities: [Modality.IMAGE] });
 };
 
-export const createEditingPlan = async (prompt: string, base64Image: string): Promise<EditingPlan> => {
+// AGENT 1: The Business Strategist
+const generatePersonalizedContent = async (companyWebsite: string, base64Image: string): Promise<TextReplacement[]> => {
+    const systemPrompt = `You are a world-class "Business Strategist" AI. Your task is to analyze a slide image and a company website to generate a list of text replacements that will make the slide highly relevant to that company.
+1.  **Analyze the slide image:** Use your vision to read and understand the content and structure of the provided slide.
+2.  **Research the company:** Use Google Search with the provided website URL (\`${companyWebsite}\`) to understand the company's core business, products, services, and terminology.
+3.  **Generate Replacements:** Identify key phrases or generic terms on the slide that can be replaced with company-specific content. Create a list of replacements. The "originalText" MUST match text on the slide exactly.
+4.  **Output:** Return a valid JSON array of objects with the schema \`{ "originalText": "text to find on slide", "newText": "new company-specific text" }\`.`;
+    
+    const imagePart = fileToGenerativePart(base64Image);
+    const textPart = { text: systemPrompt };
+
+    const response = await ai.models.generateContent({
+        model: "gemini-2.5-flash",
+        contents: { parts: [imagePart, textPart] },
+        config: { tools: [{ googleSearch: {} }] }
+    });
+    
+    const jsonText = response.text.trim().replace(/^```json\s*|```\s*$/g, '');
     try {
-        const systemPrompt = `You are a world-class AI agent acting as a "Design Analyst". Your job is to analyze a slide image and a user's request to create a structured JSON plan for an automated editing engine. You have two main tasks: 'rearrange-and-remove' for complex layouts, and 'generative-edit' for all other creative tasks.
+        return JSON.parse(jsonText);
+    } catch (e) {
+        console.error("Failed to parse personalized content from AI:", e, jsonText);
+        throw new Error("The AI strategist failed to generate a valid content plan.");
+    }
+};
+
+// Main Orchestrator for the "Personalize" feature
+export const getPersonalizedVariations = async (companyWebsite: string, base64Image: string): Promise<string[]> => {
+    const replacements = await generatePersonalizedContent(companyWebsite, base64Image);
+
+    if (!replacements || replacements.length === 0) {
+        throw new Error("The AI strategist could not find any content to personalize on this slide.");
+    }
+
+    const replacementInstructions = replacements.map(r => `- Replace the text "${r.originalText}" with "${r.newText}"`).join('\n');
+    const artistPrompt = `You are a "High-Fidelity Artist". Your task is to edit the provided slide image by replacing specific text.
+**Instructions:**
+1.  Carefully find and replace the following text on the slide:
+${replacementInstructions}
+2.  **CRITICAL:** The new text must perfectly match the font, color, size, position, and style of the text it is replacing.
+3.  **DO NOT** change any other part of the slide. The layout, other text, and images must be preserved with 100% accuracy.`;
+
+    const variationPrompts = [
+        artistPrompt,
+        `${artistPrompt}\n(For this version, try a slightly more creative or visually distinct style for the new text if possible, while still matching the slide's overall theme.)`,
+        `${artistPrompt}\n(For this version, offer another alternative that is clean and professional.)`,
+    ];
+
+    const results: string[] = [];
+    for (const p of variationPrompts) {
+        results.push(await editImage(base64Image, p));
+    }
+    
+    return results;
+};
+
+// The simple, single-step generative function that relies on the AI's vision.
+export const getGenerativeVariations = async (prompt: string, base64Image: string): Promise<string[]> => {
+    const systemPrompt = `You are a world-class AI agent acting as a "Design Analyst". Your job is to analyze a slide image and a user's request to create a perfect, actionable prompt for a generative image model.
 
 **Your Process:**
-1.  **Analyze the Image:** The provided slide image is your ONLY source of truth. Use your vision to perform OCR and identify all major content blocks (e.g., titled columns, text boxes). For each block, determine its sequential ID (starting from 1), its title, its text content (as an array of strings), and its precise bounding box (\`{x, y, width, height}\`). Also identify the main slide title and its bounding box.
+1.  **Analyze the Image:** The provided slide image is your ONLY source of truth. Use your vision to perform OCR and understand the slide's content, layout, and style.
 2.  **Analyze the User's Request:** Understand the user's core intent.
-3.  **Choose an Action:**
-    *   If the user's request involves removing, reordering, or rearranging major content blocks (like columns), you MUST choose the \`'rearrange-and-remove'\` action.
-    *   For ALL other requests (adding logos, changing text color, adding new items, creative changes), you MUST choose the \`'generative-edit'\` action.
-4.  **Construct the JSON Output:** Based on the action, construct a single, valid JSON object.
-
-**JSON Schema for \`action: 'rearrange-and-remove'\`:**
-{
-  "action": "rearrange-and-remove",
-  "targets": [/* Array of integer IDs of the blocks to REMOVE */],
-  "contentBlocks": [
-    { "id": 1, "title": "...", "content": ["..."], "box": { "x": 0, "y": 0, "width": 0, "height": 0 } },
-    /* ... one object for EVERY identified block on the original slide */
-  ],
-  "slideTitle": { "text": "...", "box": { "x": 0, "y": 0, "width": 0, "height": 0 } }
-}
-
-**JSON Schema for \`action: 'generative-edit'\`:**
-{
-  "action": "generative-edit",
-  "refinedPrompt": "/* Your expertly crafted, high-fidelity prompt for the image model, based on a visual analysis of the slide and the user's request. Preserve style, fonts, and colors meticulously. Handle list manipulation (add, remove, renumber) by defining the final desired state of the list. */"
-}
+3.  **Construct a High-Fidelity Prompt:** Create an expertly crafted, high-fidelity prompt for the image model. This prompt must describe the **FINAL DESIRED STATE**. Do not give sequential instructions like "First do X, then do Y."
+    *   **Fidelity is Paramount**: Your prompt MUST include this non-negotiable rule: **"It is absolutely critical to preserve all original branding (logos), text, fonts, colors, and specific numbering with 100% accuracy. The final image must be a perfect match in style to the original, with only the requested change applied."**
+    *   **For List Manipulation (Add, Remove, Renumber):** Analyze the list in the image. Determine the final, correct state of the list's content and numbering. Your prompt must explicitly describe this final state (e.g., "Recreate this slide to contain only three numbered items: '01 ...', '02 ...', '03 ...'").
 ---
 **User's Request:** "${prompt}"`;
         
-        const imagePart = fileToGenerativePart(base64Image);
-        const textPart = { text: systemPrompt };
+    const imagePart = fileToGenerativePart(base64Image);
+    const textPart = { text: systemPrompt };
 
-        const response = await ai.models.generateContent({
-            model: "gemini-2.5-flash",
-            contents: { parts: [imagePart, textPart] },
-        });
-
-        const sources = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
-        const jsonText = response.text.trim();
-
-        let parsedResult: Partial<EditingPlan>;
-
-        try {
-            const cleanJsonText = jsonText.replace(/^```json\s*|```\s*$/g, '');
-            parsedResult = JSON.parse(cleanJsonText);
-        } catch (e) {
-            console.warn("Failed to parse JSON plan from AI, falling back to generative edit.", e, "Raw text:", jsonText);
-            // Fallback: create a simple one-step plan with the user's original prompt.
-            return { action: 'generative-edit', refinedPrompt: prompt, sources: [] };
-        }
-        
-        return { ...parsedResult, sources } as EditingPlan;
-
-    } catch (error) {
-        console.error("Error creating editing plan with Gemini:", error);
-        // Fallback to original prompt on error
-        return { action: 'generative-edit', refinedPrompt: prompt, sources: [] };
+    const response = await ai.models.generateContent({
+        model: "gemini-2.5-flash",
+        contents: { parts: [imagePart, textPart] },
+    });
+    
+    const refinedPrompt = response.text.trim();
+    if (!refinedPrompt) {
+        throw new Error("The AI Analyst failed to generate a refined prompt.");
     }
+    
+     const variationPrompts = [
+        refinedPrompt,
+        `${refinedPrompt} (Try a slightly different, creative style.)`,
+        `${refinedPrompt} (Offer another alternative version.)`,
+    ];
+
+    const results: string[] = [];
+    for (const p of variationPrompts) {
+        results.push(await editImage(base64Image, p));
+    }
+    
+    return results;
 };

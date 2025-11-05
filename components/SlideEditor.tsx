@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { Slide } from '../types';
-import { editImage, createEditingPlan, compositeImage, inpaintImage, EditingPlan, ContentBlock } from '../services/geminiService';
+import { getGenerativeVariations, getPersonalizedVariations, compositeImage } from '../services/geminiService';
 import VariantSelector from './VariantSelector';
 
 interface ActiveSlideViewProps {
@@ -62,81 +62,20 @@ const launderImageSrc = (src: string): Promise<string> => {
     });
 };
 
-const executeProgrammaticLayoutChange = (plan: EditingPlan, originalImage: HTMLImageElement): string => {
-    const canvas = document.createElement('canvas');
-    canvas.width = originalImage.naturalWidth;
-    canvas.height = originalImage.naturalHeight;
-    const ctx = canvas.getContext('2d');
-
-    if (!ctx) {
-        throw new Error("Could not create canvas context for programmatic edit.");
-    }
-    
-    // Clear with a white background
-    ctx.fillStyle = 'white';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-    // Get the blocks to keep
-    const blocksToKeep = (plan.contentBlocks || []).filter(block => !(plan.targets || []).includes(block.id));
-    
-    // Draw the main slide title first to ensure it's in the background
-    if(plan.slideTitle) {
-         ctx.drawImage(
-            originalImage,
-            plan.slideTitle.box.x,
-            plan.slideTitle.box.y,
-            plan.slideTitle.box.width,
-            plan.slideTitle.box.height,
-            plan.slideTitle.box.x,
-            plan.slideTitle.box.y,
-            plan.slideTitle.box.width,
-            plan.slideTitle.box.height,
-        );
-    }
-
-    // Calculate new positions
-    const totalBlocksWidth = blocksToKeep.reduce((sum, block) => sum + block.box.width, 0);
-    const totalPadding = canvas.width - totalBlocksWidth;
-    const paddingPerGap = totalPadding / (blocksToKeep.length + 1);
-    
-    let currentX = paddingPerGap;
-
-    blocksToKeep.sort((a, b) => a.id - b.id).forEach(block => {
-        const sourceBox = block.box;
-        // Draw the slice from the original image to the new position
-        ctx.drawImage(
-            originalImage,
-            sourceBox.x,
-            sourceBox.y,
-            sourceBox.width,
-            sourceBox.height,
-            currentX,
-            sourceBox.y, // Keep original Y position
-            sourceBox.width,
-            sourceBox.height
-        );
-        currentX += sourceBox.width + paddingPerGap;
-    });
-
-    return canvas.toDataURL('image/png');
-};
-
-
 const ActiveSlideView: React.FC<ActiveSlideViewProps> = ({ slide, onNewSlideVersion, onUndo, onResetSlide }) => {
   const [prompt, setPrompt] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [sources, setSources] = useState<any[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [generationStatus, setGenerationStatus] = useState<string>('');
   
   const [selection, setSelection] = useState<{ x: number, y: number, width: number, height: number } | null>(null);
   const [isDrawing, setIsDrawing] = useState(false);
   const [startPoint, setStartPoint] = useState<{ x: number, y: number } | null>(null);
-  const imageContainerRef = useRef<HTMLDivElement>(null);
   const imageRef = useRef<HTMLImageElement>(null);
   
   const [variants, setVariants] = useState<string[] | null>(null);
+  const [companyWebsite, setCompanyWebsite] = useState('');
 
   const currentSrc = slide.history[slide.history.length - 1];
   const hasHistory = slide.history.length > 1;
@@ -144,8 +83,8 @@ const ActiveSlideView: React.FC<ActiveSlideViewProps> = ({ slide, onNewSlideVers
   useEffect(() => {
     setPrompt('');
     setError(null);
-    setSources([]);
     setSelection(null);
+    setCompanyWebsite('');
   }, [slide.id]);
 
   const handleGenerate = async () => {
@@ -155,46 +94,11 @@ const ActiveSlideView: React.FC<ActiveSlideViewProps> = ({ slide, onNewSlideVers
     }
     setIsGenerating(true);
     setError(null);
-    setSources([]);
+    setGenerationStatus('Analyzing request...');
 
     try {
-        setGenerationStatus('Analyzing request...');
-        const plan = await createEditingPlan(prompt, currentSrc);
-
-        if (plan.sources.length > 0) setSources(plan.sources);
-
-        if (plan.action === 'rearrange-and-remove' && plan.contentBlocks) {
-            setGenerationStatus('Executing programmatic layout...');
-            
-            // This requires the original image element to slice from
-            const originalImage = new Image();
-            await new Promise((resolve, reject) => {
-                originalImage.onload = resolve;
-                originalImage.onerror = reject;
-                originalImage.src = currentSrc;
-            });
-
-            const newImageSrc = executeProgrammaticLayoutChange(plan, originalImage);
-            // For programmatic, all "variants" will be the same perfect result.
-            setVariants([newImageSrc, newImageSrc, newImageSrc]);
-
-        } else if (plan.action === 'generative-edit' && plan.refinedPrompt) {
-            setGenerationStatus('Generating final variations...');
-            const variationPrompts = [
-                plan.refinedPrompt,
-                `${plan.refinedPrompt} (Try a slightly different, creative style.)`,
-                `${plan.refinedPrompt} (Offer another alternative version.)`,
-            ];
-
-            const newImageSrcs: string[] = [];
-            for (const p of variationPrompts) {
-                 newImageSrcs.push(await editImage(currentSrc, p));
-            }
-            setVariants(newImageSrcs);
-        } else {
-            throw new Error("The AI Analyst returned an invalid plan. Please try a different prompt.");
-        }
-
+        const newImageSrcs = await getGenerativeVariations(prompt, currentSrc);
+        setVariants(newImageSrcs);
     } catch (err: any) {
         if (err.message && err.message.includes('quota')) {
              setError("Request failed due to API rate limits. Please try again in a moment.");
@@ -205,6 +109,30 @@ const ActiveSlideView: React.FC<ActiveSlideViewProps> = ({ slide, onNewSlideVers
       setIsGenerating(false);
       setGenerationStatus('');
       setSelection(null); 
+    }
+  };
+
+  const handlePersonalize = async () => {
+    if (!companyWebsite.trim()) {
+      setError('Please enter a company website.');
+      return;
+    }
+    setIsGenerating(true);
+    setError(null);
+
+    try {
+        setGenerationStatus(`Researching ${companyWebsite}...`);
+        const newImageSrcs = await getPersonalizedVariations(companyWebsite, currentSrc);
+        setVariants(newImageSrcs);
+    } catch (err: any) {
+        if (err.message && err.message.includes('quota')) {
+             setError("Request failed due to API rate limits. Please try again in a moment.");
+        } else {
+            setError(err.message || 'An unknown error occurred during personalization.');
+        }
+    } finally {
+      setIsGenerating(false);
+      setGenerationStatus('');
     }
   };
 
@@ -231,7 +159,6 @@ const ActiveSlideView: React.FC<ActiveSlideViewProps> = ({ slide, onNewSlideVers
         setIsGenerating(true);
         setGenerationStatus('Generating placement options...');
         setError(null);
-        setSources([]); 
         try {
             const placementPrompt = prompt.trim() || 'Place the uploaded image in a suitable location on the slide.';
             const basePrompts = [
@@ -314,7 +241,6 @@ const ActiveSlideView: React.FC<ActiveSlideViewProps> = ({ slide, onNewSlideVers
     }
   };
 
-
   const handleCancelVariants = () => {
     setVariants(null);
   };
@@ -324,7 +250,7 @@ const ActiveSlideView: React.FC<ActiveSlideViewProps> = ({ slide, onNewSlideVers
     <>
         <div className="bg-gray-800 flex-grow flex flex-col p-4 md:p-6 lg:p-8 overflow-y-auto">
             <div 
-                ref={imageContainerRef}
+                ref={imageRef}
                 className="relative aspect-video bg-gray-900 rounded-lg shadow-lg flex items-center justify-center w-full max-w-4xl mx-auto select-none cursor-crosshair"
                 onMouseDown={handleMouseDown}
                 onMouseMove={handleMouseMove}
@@ -370,85 +296,84 @@ const ActiveSlideView: React.FC<ActiveSlideViewProps> = ({ slide, onNewSlideVers
             </div>
 
             <div className="w-full max-w-2xl mx-auto mt-6 flex-shrink-0">
-            <div className="flex justify-between items-center mb-2">
-                <h3 className="font-semibold text-white truncate pr-2" title={slide.name}>
-                    Editing: {slide.name}
-                </h3>
-                <div className="flex items-center space-x-4">
-                    {hasHistory && (
-                        <button onClick={handleUndo} className="flex items-center text-sm text-blue-400 hover:text-blue-300 disabled:opacity-50 disabled:cursor-not-allowed transition-colors" disabled={isGenerating}>
-                            <UndoIcon /> Undo
-                        </button>
-                    )}
-                    {hasHistory && (
-                        <button onClick={handleReset} className="flex items-center text-sm text-blue-400 hover:text-blue-300 disabled:opacity-50 disabled:cursor-not-allowed transition-colors" disabled={isGenerating}>
-                            <ResetIcon/> Reset Slide
-                        </button>
-                    )}
-                </div>
-            </div>
-            <div className="bg-gray-700 p-4 rounded-lg">
-                <textarea
-                value={prompt}
-                onChange={(e) => setPrompt(e.target.value)}
-                placeholder={selection ? "Describe the change for the selected area..." : "e.g., 'Add a blue rocket' or 'Place uploaded image on the top right'"}
-                className="w-full p-3 text-sm bg-gray-800 border border-gray-600 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all resize-none text-gray-200 placeholder-gray-400 h-24"
-                disabled={isGenerating}
-                />
-                {error && <p className="text-red-400 text-xs mt-2">{error}</p>}
-                <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4 items-center">
-                <button
-                    onClick={handleGenerate}
-                    disabled={isGenerating || !prompt}
-                    className="w-full inline-flex items-center justify-center px-6 py-3 border border-transparent text-base font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-gray-700 focus:ring-blue-500 disabled:bg-gray-600 disabled:cursor-not-allowed transition-colors"
-                >
-                    {isGenerating ? <><Spinner size="h-5 w-5 -ml-1 mr-3" /> Processing...</> : 'Generate with AI'}
-                </button>
-                <button
-                    onClick={handleAddImageClick}
-                    disabled={isGenerating}
-                    className="w-full inline-flex items-center justify-center px-6 py-3 border border-gray-500 text-base font-medium rounded-md shadow-sm text-white bg-gray-600 hover:bg-gray-500 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-gray-700 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                    title="Upload an image (e.g. a complex logo) to add to the slide. Use the text box above for placement instructions."
-                >
-                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 -ml-1 mr-3" viewBox="0 0 20 20" fill="currentColor">
-                        <path fillRule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM6.293 6.707a1 1 0 010-1.414l3-3a1 1 0 011.414 0l3 3a1 1 0 01-1.414 1.414L11 5.414V13a1 1 0 11-2 0V5.414L7.707 6.707a1 1 0 01-1.414 0z" clipRule="evenodd" />
-                    </svg>
-                    Upload & Place
-                </button>
-
-                <input
-                    type="file"
-                    ref={fileInputRef}
-                    onChange={handleFileChange}
-                    className="hidden"
-                    accept="image/png, image/jpeg, image/webp"
-                />
-                </div>
-                {sources.length > 0 && (
-                    <div className="mt-4 p-3 bg-gray-800 rounded-md border border-gray-600">
-                        <h4 className="text-xs font-semibold text-gray-400 mb-2">
-                            Information sourced from Google Search:
-                        </h4>
-                        <ul className="space-y-1 max-h-20 overflow-y-auto">
-                            {sources.map((source, index) => (
-                                source.web ? (
-                                    <li key={index}>
-                                        <a
-                                            href={source.web.uri}
-                                            target="_blank"
-                                            rel="noopener noreferrer"
-                                            className="text-xs text-blue-400 hover:underline block truncate"
-                                            title={source.web.uri}
-                                        >
-                                            {source.web.title || source.web.uri}
-                                        </a>
-                                    </li>
-                                ) : null
-                            ))}
-                        </ul>
+                <div className="flex justify-between items-center mb-2">
+                    <h3 className="font-semibold text-white truncate pr-2" title={slide.name}>
+                        Editing: {slide.name}
+                    </h3>
+                    <div className="flex items-center space-x-4">
+                        {hasHistory && (
+                            <button onClick={handleUndo} className="flex items-center text-sm text-blue-400 hover:text-blue-300 disabled:opacity-50 disabled:cursor-not-allowed transition-colors" disabled={isGenerating}>
+                                <UndoIcon /> Undo
+                            </button>
+                        )}
+                        {hasHistory && (
+                            <button onClick={handleReset} className="flex items-center text-sm text-blue-400 hover:text-blue-300 disabled:opacity-50 disabled:cursor-not-allowed transition-colors" disabled={isGenerating}>
+                                <ResetIcon/> Reset Slide
+                            </button>
+                        )}
                     </div>
-                )}
-            </div>
+                </div>
+                <div className="bg-gray-700 p-4 rounded-lg">
+                    <textarea
+                    value={prompt}
+                    onChange={(e) => setPrompt(e.target.value)}
+                    placeholder={selection ? "Describe the change for the selected area..." : "e.g., 'Add a blue rocket' or 'Place uploaded image on the top right'"}
+                    className="w-full p-3 text-sm bg-gray-800 border border-gray-600 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all resize-none text-gray-200 placeholder-gray-400 h-24"
+                    disabled={isGenerating}
+                    />
+                    {error && <p className="text-red-400 text-xs mt-2">{error}</p>}
+                    <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4 items-center">
+                        <button
+                            onClick={handleGenerate}
+                            disabled={isGenerating || !prompt}
+                            className="w-full inline-flex items-center justify-center px-6 py-3 border border-transparent text-base font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-gray-700 focus:ring-blue-500 disabled:bg-gray-600 disabled:cursor-not-allowed transition-colors"
+                        >
+                            {isGenerating && generationStatus.startsWith('Analyzing') ? <><Spinner size="h-5 w-5 -ml-1 mr-3" /> Processing...</> : 'Generate with AI'}
+                        </button>
+                        <button
+                            onClick={handleAddImageClick}
+                            disabled={isGenerating}
+                            className="w-full inline-flex items-center justify-center px-6 py-3 border border-gray-500 text-base font-medium rounded-md shadow-sm text-white bg-gray-600 hover:bg-gray-500 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-gray-700 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                            title="Upload an image (e.g. a complex logo) to add to the slide. Use the text box above for placement instructions."
+                        >
+                            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 -ml-1 mr-3" viewBox="0 0 20 20" fill="currentColor">
+                                <path fillRule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM6.293 6.707a1 1 0 010-1.414l3-3a1 1 0 011.414 0l3 3a1 1 0 01-1.414 1.414L11 5.414V13a1 1 0 11-2 0V5.414L7.707 6.707a1 1 0 01-1.414 0z" clipRule="evenodd" />
+                            </svg>
+                            Upload & Place
+                        </button>
+
+                        <input
+                            type="file"
+                            ref={fileInputRef}
+                            onChange={handleFileChange}
+                            className="hidden"
+                            accept="image/png, image/jpeg, image/webp"
+                        />
+                    </div>
+                </div>
+                 <div className="mt-4 p-4 bg-gray-800 rounded-lg border border-gray-600">
+                    <label htmlFor="company-website" className="text-sm font-medium text-gray-300 block mb-2">
+                        Or, automatically tailor this slide for a company:
+                    </label>
+                    <div className="flex items-center gap-4">
+                        <input
+                            id="company-website"
+                            type="text"
+                            value={companyWebsite}
+                            onChange={(e) => setCompanyWebsite(e.target.value)}
+                            placeholder="e.g., dhl.com"
+                            className="flex-grow p-3 text-sm bg-gray-900 border border-gray-600 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all text-gray-200 placeholder-gray-400"
+                            disabled={isGenerating}
+                        />
+                        <button
+                            onClick={handlePersonalize}
+                            disabled={isGenerating || !companyWebsite}
+                            className="inline-flex items-center justify-center px-6 py-3 border border-transparent text-base font-medium rounded-md shadow-sm text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-gray-700 focus:ring-green-500 disabled:bg-gray-600 disabled:cursor-not-allowed transition-colors"
+                        >
+                             {isGenerating && generationStatus.startsWith('Researching') ? <><Spinner size="h-5 w-5 -ml-1 mr-3" /> Personalizing...</> : 'Personalize'}
+                        </button>
+                    </div>
+                </div>
             </div>
         </div>
         {variants && (
