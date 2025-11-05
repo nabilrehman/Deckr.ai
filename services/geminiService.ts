@@ -16,6 +16,11 @@ export interface TextReplacement {
     newText: string;
 }
 
+export interface DebugLog {
+    title: string;
+    content: string;
+}
+
 const fileToGenerativePart = (base64Data: string) => {
     const match = base64Data.match(/^data:(image\/\w+);base64,(.*)$/);
     if (!match) {
@@ -113,7 +118,7 @@ export const compositeImage = async (baseImage: string, overlayImage: string, pr
 };
 
 // AGENT 1: The Business Strategist
-const generatePersonalizedContent = async (companyWebsite: string, base64Image: string): Promise<TextReplacement[]> => {
+const generatePersonalizedContent = async (companyWebsite: string, base64Image: string, logs: DebugLog[]): Promise<TextReplacement[]> => {
     const systemPrompt = `You are a world-class "Business Strategist" AI. Your task is to analyze a slide image and a company website to generate a list of text replacements that will make the slide highly relevant to that company.
 1.  **Analyze the slide image:** Use your vision to read and understand the content and structure of the provided slide.
 2.  **Research the company:** Use Google Search with the provided website URL (\`${companyWebsite}\`) to understand the company's core business, products, services, and terminology.
@@ -121,15 +126,19 @@ const generatePersonalizedContent = async (companyWebsite: string, base64Image: 
 4.  **Output:** Return a valid JSON array of objects with the schema \`{ "originalText": "text to find on slide", "newText": "new company-specific text" }\`.`;
     
     const imagePart = fileToGenerativePart(base64Image);
-    const textPart = { text: systemPrompt };
+    const textPart = { text: `Research the company at ${companyWebsite} and analyze the attached slide to generate text replacements.` };
+
+    logs.push({ title: "Agent 1: Business Strategist (Input)", content: `Company Website: ${companyWebsite}\nSystem Prompt: ${systemPrompt}` });
 
     const response = await ai.models.generateContent({
         model: "gemini-2.5-flash",
-        contents: { parts: [imagePart, textPart] },
+        contents: { parts: [imagePart, {text: systemPrompt}] },
         config: { tools: [{ googleSearch: {} }] }
     });
     
     const jsonText = response.text.trim().replace(/^```json\s*|```\s*$/g, '');
+    logs.push({ title: "Agent 1: Business Strategist (Raw Output)", content: jsonText });
+    
     try {
         return JSON.parse(jsonText);
     } catch (e) {
@@ -139,8 +148,9 @@ const generatePersonalizedContent = async (companyWebsite: string, base64Image: 
 };
 
 // Main Orchestrator for the "Personalize" feature
-export const getPersonalizedVariations = async (companyWebsite: string, base64Image: string): Promise<string[]> => {
-    const replacements = await generatePersonalizedContent(companyWebsite, base64Image);
+export const getPersonalizedVariations = async (companyWebsite: string, base64Image: string): Promise<{ images: string[], logs: DebugLog[] }> => {
+    const logs: DebugLog[] = [{ title: "Workflow Started", content: "Personalize Slide" }];
+    const replacements = await generatePersonalizedContent(companyWebsite, base64Image, logs);
 
     if (!replacements || replacements.length === 0) {
         throw new Error("The AI strategist could not find any content to personalize on this slide.");
@@ -161,15 +171,20 @@ ${replacementInstructions}
     ];
 
     const results: string[] = [];
+    let i = 1;
     for (const p of variationPrompts) {
+        logs.push({ title: `Agent 2: High-Fidelity Artist (Input for Variation ${i})`, content: p });
         results.push(await editImage(base64Image, p));
+        i++;
     }
     
-    return results;
+    return { images: results, logs };
 };
 
 // The simple, single-step generative function that relies on the AI's vision.
-export const getGenerativeVariations = async (prompt: string, base64Image: string): Promise<string[]> => {
+export const getGenerativeVariations = async (prompt: string, base64Image: string): Promise<{ images: string[], logs: DebugLog[] }> => {
+    const logs: DebugLog[] = [{ title: "Workflow Started", content: "Generate with AI" }];
+
     const systemPrompt = `You are a world-class AI agent acting as a "Design Analyst". Your job is to analyze a slide image and a user's request to create a perfect, actionable prompt for a generative image model.
 
 **Your Process:**
@@ -183,6 +198,8 @@ export const getGenerativeVariations = async (prompt: string, base64Image: strin
         
     const imagePart = fileToGenerativePart(base64Image);
     const textPart = { text: systemPrompt };
+    
+    logs.push({ title: "Agent 1: Design Analyst (Input)", content: systemPrompt });
 
     const response = await ai.models.generateContent({
         model: "gemini-2.5-flash",
@@ -193,7 +210,8 @@ export const getGenerativeVariations = async (prompt: string, base64Image: strin
     if (!refinedPrompt) {
         throw new Error("The AI Analyst failed to generate a refined prompt.");
     }
-    
+    logs.push({ title: "Agent 1: Design Analyst (Raw Output)", content: refinedPrompt });
+
      const variationPrompts = [
         refinedPrompt,
         `${refinedPrompt} (Try a slightly different, creative style.)`,
@@ -201,9 +219,12 @@ export const getGenerativeVariations = async (prompt: string, base64Image: strin
     ];
 
     const results: string[] = [];
+    let i = 1;
     for (const p of variationPrompts) {
+        logs.push({ title: `Agent 2: Artist (Input for Variation ${i})`, content: p });
         results.push(await editImage(base64Image, p));
+        i++;
     }
     
-    return results;
+    return { images: results, logs };
 };

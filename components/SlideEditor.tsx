@@ -2,8 +2,9 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { Slide } from '../types';
-import { getGenerativeVariations, getPersonalizedVariations, compositeImage } from '../services/geminiService';
+import { getGenerativeVariations, getPersonalizedVariations, compositeImage, DebugLog } from '../services/geminiService';
 import VariantSelector from './VariantSelector';
+import DebugLogViewer from './DebugLogViewer';
 
 interface ActiveSlideViewProps {
   slide: Slide;
@@ -77,6 +78,9 @@ const ActiveSlideView: React.FC<ActiveSlideViewProps> = ({ slide, onNewSlideVers
   const [variants, setVariants] = useState<string[] | null>(null);
   const [companyWebsite, setCompanyWebsite] = useState('');
 
+  const [isDebugMode, setIsDebugMode] = useState(false);
+  const [debugLogs, setDebugLogs] = useState<DebugLog[] | null>(null);
+
   const currentSrc = slide.history[slide.history.length - 1];
   const hasHistory = slide.history.length > 1;
 
@@ -97,8 +101,11 @@ const ActiveSlideView: React.FC<ActiveSlideViewProps> = ({ slide, onNewSlideVers
     setGenerationStatus('Analyzing request...');
 
     try {
-        const newImageSrcs = await getGenerativeVariations(prompt, currentSrc);
-        setVariants(newImageSrcs);
+        const { images, logs } = await getGenerativeVariations(prompt, currentSrc);
+        setVariants(images);
+        if (isDebugMode) {
+            setDebugLogs(logs);
+        }
     } catch (err: any) {
         if (err.message && err.message.includes('quota')) {
              setError("Request failed due to API rate limits. Please try again in a moment.");
@@ -122,8 +129,11 @@ const ActiveSlideView: React.FC<ActiveSlideViewProps> = ({ slide, onNewSlideVers
 
     try {
         setGenerationStatus(`Researching ${companyWebsite}...`);
-        const newImageSrcs = await getPersonalizedVariations(companyWebsite, currentSrc);
-        setVariants(newImageSrcs);
+        const { images, logs } = await getPersonalizedVariations(companyWebsite, currentSrc);
+        setVariants(images);
+        if (isDebugMode) {
+            setDebugLogs(logs);
+        }
     } catch (err: any) {
         if (err.message && err.message.includes('quota')) {
              setError("Request failed due to API rate limits. Please try again in a moment.");
@@ -301,6 +311,21 @@ const ActiveSlideView: React.FC<ActiveSlideViewProps> = ({ slide, onNewSlideVers
                         Editing: {slide.name}
                     </h3>
                     <div className="flex items-center space-x-4">
+                        <div className="flex items-center space-x-2">
+                            <label htmlFor="debug-mode" className="text-xs text-gray-400 cursor-pointer">Debug Mode</label>
+                            <div className="relative inline-block w-10 mr-2 align-middle select-none transition duration-200 ease-in">
+                                <input 
+                                    type="checkbox" 
+                                    name="debug-mode" 
+                                    id="debug-mode" 
+                                    checked={isDebugMode}
+                                    onChange={() => setIsDebugMode(!isDebugMode)}
+                                    className="toggle-checkbox absolute block w-6 h-6 rounded-full bg-white border-4 appearance-none cursor-pointer"
+                                />
+                                <label htmlFor="debug-mode" className="toggle-label block overflow-hidden h-6 rounded-full bg-gray-600 cursor-pointer"></label>
+                            </div>
+                            <style>{`.toggle-checkbox:checked { right: 0; border-color: #2563eb; } .toggle-checkbox:checked + .toggle-label { background-color: #2563eb; }`}</style>
+                        </div>
                         {hasHistory && (
                             <button onClick={handleUndo} className="flex items-center text-sm text-blue-400 hover:text-blue-300 disabled:opacity-50 disabled:cursor-not-allowed transition-colors" disabled={isGenerating}>
                                 <UndoIcon /> Undo
@@ -383,6 +408,9 @@ const ActiveSlideView: React.FC<ActiveSlideViewProps> = ({ slide, onNewSlideVers
                 onCancel={handleCancelVariants}
                 onRegenerate={handleGenerate}
             />
+        )}
+        {debugLogs && (
+            <DebugLogViewer logs={debugLogs} onClose={() => setDebugLogs(null)} />
         )}
     </>
   );
