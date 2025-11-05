@@ -1,11 +1,13 @@
 
-
 import { GoogleGenAI, Modality } from "@google/genai";
 
-// Fix: Initialize GoogleGenAI directly with the environment variable as per guidelines.
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
-export type EditType = 'global' | 'local';
+export interface RefinedPrompt {
+    refinedPrompt: string;
+    sources: any[];
+}
+
 
 const fileToGenerativePart = (base64Data: string) => {
     const match = base64Data.match(/^data:(image\/\w+);base64,(.*)$/);
@@ -23,9 +25,7 @@ const fileToGenerativePart = (base64Data: string) => {
     };
 };
 
-// Helper to create a mask from selection
 const createMaskFromSelection = async (
-    imageSrc: string,
     selection: { x: number; y: number; width: number; height: number; naturalWidth: number; naturalHeight: number }
 ): Promise<string> => {
     const canvas = document.createElement('canvas');
@@ -37,11 +37,9 @@ const createMaskFromSelection = async (
         throw new Error("Could not create canvas context for mask.");
     }
 
-    // Black background
     ctx.fillStyle = 'black';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-    // White rectangle for the editable area
     ctx.fillStyle = 'white';
     ctx.fillRect(selection.x, selection.y, selection.width, selection.height);
 
@@ -74,175 +72,87 @@ const generateSingleImage = async (model: string, parts: any[], config: any): Pr
     throw new Error("No image data found in the AI's response.");
 };
 
-
-export const editImage = async (base64Image: string, prompt: string): Promise<string[]> => {
-    try {
-        const imagePart = fileToGenerativePart(base64Image);
-        
-        const prompts = [
-            prompt,
-            `${prompt} (Try a slightly different, creative style.)`,
-            `${prompt} (Offer another alternative version.)`,
-        ];
-
-        const promises = prompts.map(p => {
-            const textPart = { text: p };
-            return generateSingleImage('gemini-2.5-flash-image', [imagePart, textPart], { responseModalities: [Modality.IMAGE] });
-        });
-
-        return await Promise.all(promises);
-    } catch (error: any) {
-        console.error("Error editing image with Gemini:", error);
-        if (error.message && (error.message.includes('API key not valid') || error.message.includes('API_KEY_INVALID'))) {
-            throw new Error("Invalid API Key. Please ensure your API key is correctly configured in the environment secrets.");
-        }
-        throw new Error("Failed to generate image variations. Please check the console for more details.");
-    }
+export const editImage = async (base64Image: string, prompt: string): Promise<string> => {
+    const imagePart = fileToGenerativePart(base64Image);
+    const textPart = { text: prompt };
+    return generateSingleImage('gemini-2.5-flash-image', [imagePart, textPart], { responseModalities: [Modality.IMAGE] });
 };
 
 export const inpaintImage = async (
     base64Image: string,
     selection: { x: number; y: number; width: number; height: number; naturalWidth: number; naturalHeight: number },
     prompt: string
-): Promise<string[]> => {
-    try {
-        const maskBase64 = await createMaskFromSelection(base64Image, selection);
-        
-        const imagePart = fileToGenerativePart(base64Image);
-        const maskPart = fileToGenerativePart(maskBase64);
-
-        const createInpaintPrompt = (p: string) => `You are an expert image editor performing an inpainting task. You are given three inputs:
+): Promise<string> => {
+    const maskBase64 = await createMaskFromSelection(selection);
+    const imagePart = fileToGenerativePart(base64Image);
+    const maskPart = fileToGenerativePart(maskBase64);
+    const inpaintPrompt = `You are an expert image editor performing an inpainting task. You are given three inputs:
 1. An original image.
 2. A mask image (black with a white area).
 3. A text prompt describing a change.
 Your task is to edit the original image **only** within the area defined by the white region of the mask. You MUST preserve the rest of the original image perfectly.
-The edit to perform within the masked area is: "${p}"`;
-        
-        const prompts = [
-            createInpaintPrompt(prompt),
-            createInpaintPrompt(`${prompt} (subtle variation)`),
-            createInpaintPrompt(`${prompt} (another option)`),
-        ];
-
-        const promises = prompts.map(p => {
-            const textPart = { text: p };
-            return generateSingleImage('gemini-2.5-flash-image', [imagePart, maskPart, textPart], { responseModalities: [Modality.IMAGE] });
-        });
-
-        return await Promise.all(promises);
-
-    } catch (error: any) {
-        console.error("Error inpainting image with Gemini:", error);
-        if (error.message && (error.message.includes('API key not valid') || error.message.includes('API_KEY_INVALID'))) {
-            throw new Error("Invalid API Key. Please ensure your API key is correctly configured in the environment secrets.");
-        }
-        throw new Error("Failed to edit the selected area. Please check the console for more details.");
-    }
+The edit to perform within the masked area is: "${prompt}"`;
+    const textPart = { text: inpaintPrompt };
+    return generateSingleImage('gemini-2.5-flash-image', [imagePart, maskPart, textPart], { responseModalities: [Modality.IMAGE] });
 };
 
 
-export const compositeImage = async (baseImage: string, overlayImage: string, prompt: string): Promise<string[]> => {
-    try {
-        const baseImagePart = fileToGenerativePart(baseImage);
-        const overlayImagePart = fileToGenerativePart(overlayImage);
-        
-        const createCompositePrompt = (p: string) => `Perfectly preserve the first image (the slide). Place the second image (the logo) on top of the first image according to these instructions: ${p}. Do not change the slide content, colors, or layout. It's critical that the original slide is preserved.`;
-
-        const prompts = [
-            createCompositePrompt(prompt),
-            createCompositePrompt(`${prompt} (Place it in a slightly different position or size as an alternative.)`),
-            createCompositePrompt(`${prompt} (Provide a third placement option.)`),
-        ];
-        
-        const promises = prompts.map(p => {
-             const textPart = { text: p };
-             return generateSingleImage('gemini-2.5-flash-image', [baseImagePart, overlayImagePart, textPart], { responseModalities: [Modality.IMAGE] });
-        });
-
-        return await Promise.all(promises);
-
-    } catch (error: any) {
-        console.error("Error compositing image with Gemini:", error);
-        if (error.message && (error.message.includes('API key not valid') || error.message.includes('API_KEY_INVALID'))) {
-            throw new Error("Invalid API Key. Please ensure your API key is correctly configured in the environment secrets.");
-        }
-        throw new Error("Failed to place image. Please check the console for more details.");
-    }
+export const compositeImage = async (baseImage: string, overlayImage: string, prompt: string): Promise<string> => {
+    const baseImagePart = fileToGenerativePart(baseImage);
+    const overlayImagePart = fileToGenerativePart(overlayImage);
+    const compositePrompt = `Perfectly preserve the first image (the slide). Place the second image (the logo) on top of the first image according to these instructions: ${prompt}. Do not change the slide content, colors, or layout. It's critical that the original slide is preserved.`;
+    const textPart = { text: compositePrompt };
+    return generateSingleImage('gemini-2.5-flash-image', [baseImagePart, overlayImagePart, textPart], { responseModalities: [Modality.IMAGE] });
 };
 
-export const researchAndRefinePrompt = async (prompt: string): Promise<{ refinedPrompt: string; sources: any[]; editType: EditType }> => {
+export const researchAndRefinePrompt = async (prompt: string, base64Image: string): Promise<RefinedPrompt> => {
     try {
-        const systemPrompt = `You are a world-class prompt engineer and design specialist. Your job is to analyze a user's request for editing a slide and convert it into a perfect, actionable prompt for a generative image model. You must also determine if the edit is 'global' (affecting the whole slide layout) or 'local' (a small change in a specific area).
+        const systemPrompt = `You are a world-class AI agent strategist with vision. Your job is to analyze a user's request and the provided slide image to create a perfect, actionable prompt for a generative image model.
 
-Your process is as follows:
-1.  **Analyze Intent**: Understand the user's core goal. Are they making a small tweak or a large structural change?
-2.  **Determine Scope**:
-    *   **'global'**: Use for requests that change the layout, like rearranging, reorganizing, or redesigning elements. **Crucially, if a user asks to REMOVE a major layout element (e.g., a column, a large box), you MUST classify this as a 'global' edit.** This is because the remaining content needs to be intelligently re-flowed to look professional.
-    *   **'local'**: Use for small, contained changes, like adding a small icon, removing a blemish, or changing the color of a single object. The user's text prompt takes precedence; if they ask for a global change, ignore any small selection they might have made.
-3.  **Rewrite the Prompt (The MOST IMPORTANT step)**:
-    *   For **'local'** edits, the prompt should be simple and direct: "Add a small red circle," "Erase the scratch."
-    *   For **'global'** edits, your prompt must describe the **FINAL DESIRED STATE**. Do not give sequential instructions like "First do X, then do Y." This confuses the model.
-    *   **Fidelity is Paramount for 'global' edits**: When rewriting the prompt, you must add the following non-negotiable rule: **"It is absolutely critical to preserve all original text, fonts, colors, and especially any specific numbering (e.g., '01, 02, 06') with 100% accuracy. Do not 'correct' or re-sequence numbers. The final image must be a perfect match in style to the original, with only the requested change applied."** Your refined prompt must incorporate this principle.
-    *   **For removing elements**: A robust prompt is: **"Flawlessly remove the [element description, e.g., 'the empty, second column from the left']. Then, intelligently expand and redistribute the remaining content to create a balanced, professional, and evenly spaced layout. It is critical that all other text, icons, colors, and styling are preserved with 100% accuracy."**
-4.  **Output**: Return a JSON object with "editType" and "refinedPrompt".
+**Core Principles:**
+1.  **Analyze the Image First:** The provided slide image is your primary source of truth. Read its content, understand its layout, and identify its visual style (fonts, colors, logos).
+2.  **Describe the Final State:** Your prompt must describe the **FINAL, DESIRED STATE**. Do not give sequential instructions like "First do X, then do Y." This confuses the image model.
+3.  **Preserve Fidelity:** This is your most important rule. Your prompt must instruct the image model to preserve the original slide's style with 100% accuracy. This includes all original text, fonts, colors, logos, and visual elements unless they are the specific target of the edit.
 
-**Example 1 (Global Edit - Add Item):**
-*   User's Request: "add a 6th item for 'Questions', keeping the style"
-*   Your Analysis: This is a layout change, requiring shifting existing items. 'global' edit.
-*   Your Output:
-    \`\`\`json
-    {
-      "editType": "global",
-      "refinedPrompt": "Add a new item to the agenda list: '06 Questions'. The new item must perfectly match the font, color, size, and alignment of the existing items. The original items must be preserved perfectly. It is absolutely critical to preserve all original text, fonts, colors, and especially the original numbering ('01', '02', '03', '04') with 100% accuracy. The final slide should look professionally designed."
-    }
-    \`\`\`
+**How to Handle List Manipulation (A Critical Task):**
+*   When a user asks to add, remove, or modify items in a list, your primary job is to use your vision to figure out what the **final, correct version of the list** should be.
+*   Your refined prompt must then describe this final state with extreme precision.
+*   **Example for a "remove and renumber" request:** A user wants to remove items 3 and 4 from a 5-item list. You must analyze the image to find the content for items 1, 2, and 5. Then, you must construct a prompt like this: "Recreate this slide to contain only three numbered items. The items, in sequential order, must be '01 [Content of original item 1]', '02 [Content of original item 2]', and '03 [Content of original item 5]'. It is absolutely critical that the final numbering is sequential and the style perfectly matches the original."
 
-**Example 2 (Local Edit - Add Object):**
-*   User's Request: "add a checkmark icon here"
-*   Your Analysis: Small, contained addition. 'local' edit.
-*   Your Output:
-    \`\`\`json
-    {
-      "editType": "local",
-      "refinedPrompt": "Add a green checkmark icon inside this area. The style should be simple and clean."
-    }
-    \`\`\`
+**Output Format:**
+You MUST return a single, valid JSON object with one key:
+*   "refinedPrompt": A string containing your final, expertly crafted prompt for the image model.
 
-Now, process the user's request below.
-
-User's request: "${prompt}"`;
+---
+**User's Request:** "${prompt}"`;
+        
+        const imagePart = fileToGenerativePart(base64Image);
+        const textPart = { text: systemPrompt };
 
         const response = await ai.models.generateContent({
             model: "gemini-2.5-flash",
-            contents: systemPrompt,
-            config: {
-                tools: [{googleSearch: {}}],
-            },
+            contents: { parts: [imagePart, textPart] },
         });
 
         const sources = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
         const jsonText = response.text.trim();
 
-        let parsedResult: { editType: EditType; refinedPrompt: string };
+        let parsedResult: { refinedPrompt: string };
 
         try {
-            // The model often wraps the JSON in markdown backticks, so we strip those.
             const cleanJsonText = jsonText.replace(/^```json\s*|```\s*$/g, '');
             parsedResult = JSON.parse(cleanJsonText);
-            if (typeof parsedResult.editType !== 'string' || typeof parsedResult.refinedPrompt !== 'string' || !['global', 'local'].includes(parsedResult.editType)) {
-                throw new Error("Invalid JSON structure from AI.");
-            }
         } catch (e) {
-            console.warn("Failed to parse JSON from prompt refinement, falling back to global edit.", e, "Raw text:", jsonText);
-            // Fallback logic if JSON is malformed
-            return { refinedPrompt: prompt, sources, editType: 'global' };
+            console.warn("Failed to parse JSON plan from AI, falling back to a single step.", e, "Raw text:", jsonText);
+            // Fallback: create a simple one-step plan with the user's original prompt.
+            return { refinedPrompt: prompt, sources: [] };
         }
         
         return { ...parsedResult, sources };
 
     } catch (error) {
         console.error("Error refining prompt with Gemini:", error);
-        // Fallback to original prompt and global edit on error
-        return { refinedPrompt: prompt, sources: [], editType: 'global' };
+        // Fallback to original prompt on error
+        return { refinedPrompt: prompt, sources: [] };
     }
 };

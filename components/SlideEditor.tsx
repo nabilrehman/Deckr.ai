@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { Slide } from '../types';
-import { editImage, researchAndRefinePrompt, compositeImage, inpaintImage } from '../services/geminiService';
+import { editImage, researchAndRefinePrompt, compositeImage, inpaintImage, RefinedPrompt } from '../services/geminiService';
 import VariantSelector from './VariantSelector';
 
 interface ActiveSlideViewProps {
@@ -30,6 +30,37 @@ const UndoIcon: React.FC = () => (
     </svg>
 );
 
+/**
+ * Normalizes an image data source by drawing it onto a canvas and exporting it as a clean PNG.
+ * This "launders" the image, removing any potential metadata or non-standard formatting from
+ * the original source (especially important for AI-generated images) to ensure it's a valid
+ * input for subsequent API calls.
+ * @param src The source of the image (e.g., a base64 data URL).
+ * @returns A promise that resolves with the clean, base64-encoded PNG data URL.
+ */
+const launderImageSrc = (src: string): Promise<string> => {
+    return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => {
+            const canvas = document.createElement('canvas');
+            canvas.width = img.naturalWidth;
+            canvas.height = img.naturalHeight;
+            const ctx = canvas.getContext('2d');
+            if (!ctx) {
+                return reject(new Error('Failed to get canvas context for image processing.'));
+            }
+            ctx.drawImage(img, 0, 0);
+            resolve(canvas.toDataURL('image/png'));
+        };
+        img.onerror = () => {
+            reject(new Error('Failed to load the selected image for processing.'));
+        };
+        // Use crossOrigin to handle potential CORS issues if images were from external sources.
+        img.crossOrigin = 'Anonymous';
+        img.src = src;
+    });
+};
+
 
 const ActiveSlideView: React.FC<ActiveSlideViewProps> = ({ slide, onNewSlideVersion, onUndo, onResetSlide }) => {
   const [prompt, setPrompt] = useState('');
@@ -39,14 +70,12 @@ const ActiveSlideView: React.FC<ActiveSlideViewProps> = ({ slide, onNewSlideVers
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [generationStatus, setGenerationStatus] = useState<string>('');
   
-  // State for selection box
   const [selection, setSelection] = useState<{ x: number, y: number, width: number, height: number } | null>(null);
   const [isDrawing, setIsDrawing] = useState(false);
   const [startPoint, setStartPoint] = useState<{ x: number, y: number } | null>(null);
   const imageContainerRef = useRef<HTMLDivElement>(null);
   const imageRef = useRef<HTMLImageElement>(null);
   
-  // State for variations
   const [variants, setVariants] = useState<string[] | null>(null);
 
   const currentSrc = slide.history[slide.history.length - 1];
@@ -56,9 +85,8 @@ const ActiveSlideView: React.FC<ActiveSlideViewProps> = ({ slide, onNewSlideVers
     setPrompt('');
     setError(null);
     setSources([]);
-    setSelection(null); // Reset selection when slide changes
+    setSelection(null);
   }, [slide.id]);
-
 
   const handleGenerate = async () => {
     if (!prompt.trim()) {
@@ -70,46 +98,36 @@ const ActiveSlideView: React.FC<ActiveSlideViewProps> = ({ slide, onNewSlideVers
     setSources([]);
 
     try {
-        setGenerationStatus('Analyzing your request...');
-        const { refinedPrompt, sources: newSources, editType } = await researchAndRefinePrompt(prompt);
-        if (newSources.length > 0) setSources(newSources);
+        setGenerationStatus('Analyzing request...');
+        const { refinedPrompt, sources } = await researchAndRefinePrompt(prompt, currentSrc);
+
+        if (sources.length > 0) setSources(sources);
         
-        let newImageSrcs: string[] = [];
+        setGenerationStatus('Generating final variations...');
+        const variationPrompts = [
+            refinedPrompt,
+            `${refinedPrompt} (Try a slightly different, creative style.)`,
+            `${refinedPrompt} (Offer another alternative version.)`,
+        ];
 
-        // Use inpainting tool only if the AI determines it's a 'local' edit AND a selection exists.
-        if (editType === 'local' && selection && imageRef.current) {
-            setGenerationStatus('Generating variations...');
-            const { naturalWidth, naturalHeight, clientWidth, clientHeight } = imageRef.current;
-            
-            // Calculate scaling factors
-            const scaleX = naturalWidth / clientWidth;
-            const scaleY = naturalHeight / clientHeight;
-
-            const scaledSelection = {
-                x: selection.x * scaleX,
-                y: selection.y * scaleY,
-                width: selection.width * scaleX,
-                height: selection.height * scaleY,
-                naturalWidth,
-                naturalHeight,
-            };
-
-            newImageSrcs = await inpaintImage(currentSrc, scaledSelection, refinedPrompt);
-
-        } else {
-            // Use global edit tool for 'global' edits or if no selection is made.
-            setGenerationStatus('Generating variations...');
-            newImageSrcs = await editImage(currentSrc, refinedPrompt);
+        // Generate variations sequentially to avoid rate limiting
+        const newImageSrcs: string[] = [];
+        for (const p of variationPrompts) {
+             newImageSrcs.push(await editImage(currentSrc, p));
         }
-
+        
         setVariants(newImageSrcs);
 
     } catch (err: any) {
-        setError(err.message || 'An unknown error occurred.');
+        if (err.message && err.message.includes('quota')) {
+             setError("Request failed due to API rate limits. Please try again in a moment.");
+        } else {
+            setError(err.message || 'An unknown error occurred.');
+        }
     } finally {
       setIsGenerating(false);
       setGenerationStatus('');
-      setSelection(null); // Clear selection after generation
+      setSelection(null); 
     }
   };
 
@@ -139,8 +157,18 @@ const ActiveSlideView: React.FC<ActiveSlideViewProps> = ({ slide, onNewSlideVers
         setSources([]); 
         try {
             const placementPrompt = prompt.trim() || 'Place the uploaded image in a suitable location on the slide.';
-            const newImageSrcs = await compositeImage(currentSrc, overlayImageSrc, placementPrompt);
+            const basePrompts = [
+              placementPrompt,
+              `${placementPrompt} (Place it in a slightly different position or size as an alternative.)`,
+              `${placementPrompt} (Provide a third placement option.)`,
+            ];
+
+            const newImageSrcs: string[] = [];
+            for (const p of basePrompts) {
+                newImageSrcs.push(await compositeImage(currentSrc, overlayImageSrc, p));
+            }
             setVariants(newImageSrcs);
+
         } catch (err: any) {
             setError(err.message || 'An unknown error occurred while placing the image.');
         } finally {
@@ -157,7 +185,6 @@ const ActiveSlideView: React.FC<ActiveSlideViewProps> = ({ slide, onNewSlideVers
   const handleReset = () => { onResetSlide(slide.id); };
   const handleUndo = () => { onUndo(slide.id); };
 
-  // Mouse events for selection
   const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
     if (isGenerating) return;
     const rect = imageRef.current?.getBoundingClientRect();
@@ -187,16 +214,29 @@ const ActiveSlideView: React.FC<ActiveSlideViewProps> = ({ slide, onNewSlideVers
   
   const handleMouseUp = () => {
     setIsDrawing(false);
-    // If the selection is very small, treat it as a click and clear it
     if (selection && (selection.width < 5 || selection.height < 5)) {
         setSelection(null);
     }
   };
 
-  const handleVariantSelected = (variantSrc: string) => {
-    onNewSlideVersion(slide.id, variantSrc);
-    setVariants(null);
+  const handleVariantSelected = async (variantSrc: string) => {
+    setVariants(null); // Close modal immediately for better UX
+    setIsGenerating(true);
+    setGenerationStatus('Finalizing new version...');
+    setError(null);
+
+    try {
+        const cleanSrc = await launderImageSrc(variantSrc);
+        onNewSlideVersion(slide.id, cleanSrc);
+    } catch (err: any) {
+        console.error("Error processing selected image:", err);
+        setError(`Failed to finalize the selected image. ${err.message}`);
+    } finally {
+        setIsGenerating(false);
+        setGenerationStatus('');
+    }
   };
+
 
   const handleCancelVariants = () => {
     setVariants(null);
@@ -212,7 +252,7 @@ const ActiveSlideView: React.FC<ActiveSlideViewProps> = ({ slide, onNewSlideVers
                 onMouseDown={handleMouseDown}
                 onMouseMove={handleMouseMove}
                 onMouseUp={handleMouseUp}
-                onMouseLeave={handleMouseUp} // End drawing if mouse leaves container
+                onMouseLeave={handleMouseUp}
             >
             <img ref={imageRef} src={currentSrc} alt={slide.name} className="object-contain w-full h-full rounded-lg pointer-events-none" />
             {isGenerating && !variants && (
@@ -233,7 +273,7 @@ const ActiveSlideView: React.FC<ActiveSlideViewProps> = ({ slide, onNewSlideVers
                 >
                     <button
                         onClick={(e) => {
-                            e.stopPropagation(); // prevent re-triggering mousedown
+                            e.stopPropagation();
                             setSelection(null);
                         }}
                         className="absolute -top-3 -right-3 bg-blue-500 text-white rounded-full h-6 w-6 flex items-center justify-center shadow-lg pointer-events-auto hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-white"

@@ -60,28 +60,54 @@ const App: React.FC = () => {
   const handleDownloadPdf = useCallback(async () => {
     if (slides.length === 0) return;
     setIsDownloadingPdf(true);
-    
+
     try {
         const { jsPDF } = jspdf;
-        // Default PDF orientation is landscape, assuming presentation slides
         const pdf = new jsPDF({
             orientation: 'landscape',
             unit: 'px',
             format: 'a4'
         });
-        
+
         const pageWidth = pdf.internal.pageSize.getWidth();
         const pageHeight = pdf.internal.pageSize.getHeight();
+        const pageAspectRatio = pageWidth / pageHeight;
 
         for (let i = 0; i < slides.length; i++) {
             const slide = slides[i];
             const imgSrc = slide.history[slide.history.length - 1];
 
+            const img = new Image();
+            img.src = imgSrc;
+            // Use a promise to wait for the image to load to get its dimensions
+            await new Promise(resolve => { img.onload = resolve; });
+
+            const imgWidth = img.naturalWidth;
+            const imgHeight = img.naturalHeight;
+            const imgAspectRatio = imgWidth / imgHeight;
+
+            let finalImgWidth, finalImgHeight, xOffset, yOffset;
+
+            // Compare aspect ratios to determine how to scale and position
+            if (imgAspectRatio > pageAspectRatio) {
+                // Image is wider than the page, so it should fill the page width
+                finalImgWidth = pageWidth;
+                finalImgHeight = pageWidth / imgAspectRatio;
+                xOffset = 0;
+                yOffset = (pageHeight - finalImgHeight) / 2;
+            } else {
+                // Image is taller or same aspect ratio as the page, so it should fill the page height
+                finalImgHeight = pageHeight;
+                finalImgWidth = pageHeight * imgAspectRatio;
+                yOffset = 0;
+                xOffset = (pageWidth - finalImgWidth) / 2;
+            }
+
             if (i > 0) {
                 pdf.addPage();
             }
-            // Add image to fill the page, maintaining aspect ratio
-            pdf.addImage(imgSrc, 'PNG', 0, 0, pageWidth, pageHeight);
+            
+            pdf.addImage(imgSrc, 'PNG', xOffset, yOffset, finalImgWidth, finalImgHeight);
         }
         
         pdf.save('ai-deck-editor-presentation.pdf');
@@ -92,7 +118,8 @@ const App: React.FC = () => {
     } finally {
         setIsDownloadingPdf(false);
     }
-  }, [slides]);
+}, [slides]);
+
 
   const handlePresent = useCallback(() => {
     if (slides.length > 0 && activeSlideId) {
