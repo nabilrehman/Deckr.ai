@@ -9,7 +9,7 @@ interface SlidePreviewListProps {
 
 const SlidePreviewList: React.FC<SlidePreviewListProps> = ({ slides, activeSlideId, onSlideSelect }) => {
   return (
-    <aside className="w-48 bg-gray-900 flex-shrink-0 p-2 overflow-y-auto border-r border-gray-700">
+    <aside className="w-64 bg-gray-900 flex-shrink-0 p-2 overflow-y-auto border-r border-gray-700">
       <div className="space-y-2">
         {slides.map((slide, index) => (
           <div

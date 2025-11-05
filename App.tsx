@@ -5,6 +5,7 @@ import { Slide } from './types';
 import Header from './components/Header';
 import Editor from './components/Editor';
 import DeckUploader from './components/DeckUploader';
+import PresentationView from './components/PresentationView';
 
 declare const jspdf: any;
 
@@ -12,6 +13,7 @@ const App: React.FC = () => {
   const [slides, setSlides] = useState<Slide[]>([]);
   const [activeSlideId, setActiveSlideId] = useState<string | null>(null);
   const [isDownloadingPdf, setIsDownloadingPdf] = useState(false);
+  const [isPresenting, setIsPresenting] = useState(false);
 
   const handleDeckUpload = useCallback((newSlides: Slide[]) => {
     setSlides(newSlides);
@@ -92,6 +94,16 @@ const App: React.FC = () => {
     }
   }, [slides]);
 
+  const handlePresent = useCallback(() => {
+    if (slides.length > 0 && activeSlideId) {
+      setIsPresenting(true);
+    }
+  }, [slides, activeSlideId]);
+
+  const handleExitPresentation = useCallback(() => {
+    setIsPresenting(false);
+  }, []);
+
   const activeSlide = useMemo(() => {
     return slides.find(s => s.id === activeSlideId);
   }, [slides, activeSlideId]);
@@ -103,6 +115,7 @@ const App: React.FC = () => {
         hasActiveProject={slides.length > 0} 
         onDownloadPdf={handleDownloadPdf}
         isDownloading={isDownloadingPdf}
+        onPresent={handlePresent}
       />
       <main className="flex-grow overflow-hidden bg-gray-800">
         {slides.length > 0 && activeSlide ? (
@@ -118,6 +131,14 @@ const App: React.FC = () => {
           <DeckUploader onDeckUpload={handleDeckUpload} />
         )}
       </main>
+
+      {isPresenting && activeSlideId && (
+        <PresentationView
+          slides={slides}
+          activeSlideId={activeSlideId}
+          onExit={handleExitPresentation}
+        />
+      )}
     </div>
   );
 };
