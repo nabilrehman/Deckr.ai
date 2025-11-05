@@ -1,11 +1,30 @@
 
+
 import { GoogleGenAI, Modality } from "@google/genai";
 
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
-export interface RefinedPrompt {
-    refinedPrompt: string;
-    sources: any[];
+export interface BoundingBox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface ContentBlock {
+  id: number;
+  title: string;
+  content: string[];
+  box: BoundingBox;
+}
+
+export interface EditingPlan {
+  action: 'rearrange-and-remove' | 'generative-edit';
+  targets?: number[]; // IDs of blocks to remove
+  contentBlocks?: ContentBlock[];
+  slideTitle?: { text: string; box: BoundingBox };
+  refinedPrompt?: string; // For generative edits
+  sources: any[];
 }
 
 
@@ -105,24 +124,34 @@ export const compositeImage = async (baseImage: string, overlayImage: string, pr
     return generateSingleImage('gemini-2.5-flash-image', [baseImagePart, overlayImagePart, textPart], { responseModalities: [Modality.IMAGE] });
 };
 
-export const researchAndRefinePrompt = async (prompt: string, base64Image: string): Promise<RefinedPrompt> => {
+export const createEditingPlan = async (prompt: string, base64Image: string): Promise<EditingPlan> => {
     try {
-        const systemPrompt = `You are a world-class AI agent strategist with vision. Your job is to analyze a user's request and the provided slide image to create a perfect, actionable prompt for a generative image model.
+        const systemPrompt = `You are a world-class AI agent acting as a "Design Analyst". Your job is to analyze a slide image and a user's request to create a structured JSON plan for an automated editing engine. You have two main tasks: 'rearrange-and-remove' for complex layouts, and 'generative-edit' for all other creative tasks.
 
-**Core Principles:**
-1.  **Analyze the Image First:** The provided slide image is your primary source of truth. Read its content, understand its layout, and identify its visual style (fonts, colors, logos).
-2.  **Describe the Final State:** Your prompt must describe the **FINAL, DESIRED STATE**. Do not give sequential instructions like "First do X, then do Y." This confuses the image model.
-3.  **Preserve Fidelity:** This is your most important rule. Your prompt must instruct the image model to preserve the original slide's style with 100% accuracy. This includes all original text, fonts, colors, logos, and visual elements unless they are the specific target of the edit.
+**Your Process:**
+1.  **Analyze the Image:** The provided slide image is your ONLY source of truth. Use your vision to perform OCR and identify all major content blocks (e.g., titled columns, text boxes). For each block, determine its sequential ID (starting from 1), its title, its text content (as an array of strings), and its precise bounding box (\`{x, y, width, height}\`). Also identify the main slide title and its bounding box.
+2.  **Analyze the User's Request:** Understand the user's core intent.
+3.  **Choose an Action:**
+    *   If the user's request involves removing, reordering, or rearranging major content blocks (like columns), you MUST choose the \`'rearrange-and-remove'\` action.
+    *   For ALL other requests (adding logos, changing text color, adding new items, creative changes), you MUST choose the \`'generative-edit'\` action.
+4.  **Construct the JSON Output:** Based on the action, construct a single, valid JSON object.
 
-**How to Handle List Manipulation (A Critical Task):**
-*   When a user asks to add, remove, or modify items in a list, your primary job is to use your vision to figure out what the **final, correct version of the list** should be.
-*   Your refined prompt must then describe this final state with extreme precision.
-*   **Example for a "remove and renumber" request:** A user wants to remove items 3 and 4 from a 5-item list. You must analyze the image to find the content for items 1, 2, and 5. Then, you must construct a prompt like this: "Recreate this slide to contain only three numbered items. The items, in sequential order, must be '01 [Content of original item 1]', '02 [Content of original item 2]', and '03 [Content of original item 5]'. It is absolutely critical that the final numbering is sequential and the style perfectly matches the original."
+**JSON Schema for \`action: 'rearrange-and-remove'\`:**
+{
+  "action": "rearrange-and-remove",
+  "targets": [/* Array of integer IDs of the blocks to REMOVE */],
+  "contentBlocks": [
+    { "id": 1, "title": "...", "content": ["..."], "box": { "x": 0, "y": 0, "width": 0, "height": 0 } },
+    /* ... one object for EVERY identified block on the original slide */
+  ],
+  "slideTitle": { "text": "...", "box": { "x": 0, "y": 0, "width": 0, "height": 0 } }
+}
 
-**Output Format:**
-You MUST return a single, valid JSON object with one key:
-*   "refinedPrompt": A string containing your final, expertly crafted prompt for the image model.
-
+**JSON Schema for \`action: 'generative-edit'\`:**
+{
+  "action": "generative-edit",
+  "refinedPrompt": "/* Your expertly crafted, high-fidelity prompt for the image model, based on a visual analysis of the slide and the user's request. Preserve style, fonts, and colors meticulously. Handle list manipulation (add, remove, renumber) by defining the final desired state of the list. */"
+}
 ---
 **User's Request:** "${prompt}"`;
         
@@ -137,22 +166,22 @@ You MUST return a single, valid JSON object with one key:
         const sources = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
         const jsonText = response.text.trim();
 
-        let parsedResult: { refinedPrompt: string };
+        let parsedResult: Partial<EditingPlan>;
 
         try {
             const cleanJsonText = jsonText.replace(/^```json\s*|```\s*$/g, '');
             parsedResult = JSON.parse(cleanJsonText);
         } catch (e) {
-            console.warn("Failed to parse JSON plan from AI, falling back to a single step.", e, "Raw text:", jsonText);
+            console.warn("Failed to parse JSON plan from AI, falling back to generative edit.", e, "Raw text:", jsonText);
             // Fallback: create a simple one-step plan with the user's original prompt.
-            return { refinedPrompt: prompt, sources: [] };
+            return { action: 'generative-edit', refinedPrompt: prompt, sources: [] };
         }
         
-        return { ...parsedResult, sources };
+        return { ...parsedResult, sources } as EditingPlan;
 
     } catch (error) {
-        console.error("Error refining prompt with Gemini:", error);
+        console.error("Error creating editing plan with Gemini:", error);
         // Fallback to original prompt on error
-        return { refinedPrompt: prompt, sources: [] };
+        return { action: 'generative-edit', refinedPrompt: prompt, sources: [] };
     }
 };

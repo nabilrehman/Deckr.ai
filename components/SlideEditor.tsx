@@ -1,7 +1,8 @@
 
+
 import React, { useState, useEffect, useRef } from 'react';
 import { Slide } from '../types';
-import { editImage, researchAndRefinePrompt, compositeImage, inpaintImage, RefinedPrompt } from '../services/geminiService';
+import { editImage, createEditingPlan, compositeImage, inpaintImage, EditingPlan, ContentBlock } from '../services/geminiService';
 import VariantSelector from './VariantSelector';
 
 interface ActiveSlideViewProps {
@@ -61,6 +62,65 @@ const launderImageSrc = (src: string): Promise<string> => {
     });
 };
 
+const executeProgrammaticLayoutChange = (plan: EditingPlan, originalImage: HTMLImageElement): string => {
+    const canvas = document.createElement('canvas');
+    canvas.width = originalImage.naturalWidth;
+    canvas.height = originalImage.naturalHeight;
+    const ctx = canvas.getContext('2d');
+
+    if (!ctx) {
+        throw new Error("Could not create canvas context for programmatic edit.");
+    }
+    
+    // Clear with a white background
+    ctx.fillStyle = 'white';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // Get the blocks to keep
+    const blocksToKeep = (plan.contentBlocks || []).filter(block => !(plan.targets || []).includes(block.id));
+    
+    // Draw the main slide title first to ensure it's in the background
+    if(plan.slideTitle) {
+         ctx.drawImage(
+            originalImage,
+            plan.slideTitle.box.x,
+            plan.slideTitle.box.y,
+            plan.slideTitle.box.width,
+            plan.slideTitle.box.height,
+            plan.slideTitle.box.x,
+            plan.slideTitle.box.y,
+            plan.slideTitle.box.width,
+            plan.slideTitle.box.height,
+        );
+    }
+
+    // Calculate new positions
+    const totalBlocksWidth = blocksToKeep.reduce((sum, block) => sum + block.box.width, 0);
+    const totalPadding = canvas.width - totalBlocksWidth;
+    const paddingPerGap = totalPadding / (blocksToKeep.length + 1);
+    
+    let currentX = paddingPerGap;
+
+    blocksToKeep.sort((a, b) => a.id - b.id).forEach(block => {
+        const sourceBox = block.box;
+        // Draw the slice from the original image to the new position
+        ctx.drawImage(
+            originalImage,
+            sourceBox.x,
+            sourceBox.y,
+            sourceBox.width,
+            sourceBox.height,
+            currentX,
+            sourceBox.y, // Keep original Y position
+            sourceBox.width,
+            sourceBox.height
+        );
+        currentX += sourceBox.width + paddingPerGap;
+    });
+
+    return canvas.toDataURL('image/png');
+};
+
 
 const ActiveSlideView: React.FC<ActiveSlideViewProps> = ({ slide, onNewSlideVersion, onUndo, onResetSlide }) => {
   const [prompt, setPrompt] = useState('');
@@ -99,24 +159,41 @@ const ActiveSlideView: React.FC<ActiveSlideViewProps> = ({ slide, onNewSlideVers
 
     try {
         setGenerationStatus('Analyzing request...');
-        const { refinedPrompt, sources } = await researchAndRefinePrompt(prompt, currentSrc);
+        const plan = await createEditingPlan(prompt, currentSrc);
 
-        if (sources.length > 0) setSources(sources);
-        
-        setGenerationStatus('Generating final variations...');
-        const variationPrompts = [
-            refinedPrompt,
-            `${refinedPrompt} (Try a slightly different, creative style.)`,
-            `${refinedPrompt} (Offer another alternative version.)`,
-        ];
+        if (plan.sources.length > 0) setSources(plan.sources);
 
-        // Generate variations sequentially to avoid rate limiting
-        const newImageSrcs: string[] = [];
-        for (const p of variationPrompts) {
-             newImageSrcs.push(await editImage(currentSrc, p));
+        if (plan.action === 'rearrange-and-remove' && plan.contentBlocks) {
+            setGenerationStatus('Executing programmatic layout...');
+            
+            // This requires the original image element to slice from
+            const originalImage = new Image();
+            await new Promise((resolve, reject) => {
+                originalImage.onload = resolve;
+                originalImage.onerror = reject;
+                originalImage.src = currentSrc;
+            });
+
+            const newImageSrc = executeProgrammaticLayoutChange(plan, originalImage);
+            // For programmatic, all "variants" will be the same perfect result.
+            setVariants([newImageSrc, newImageSrc, newImageSrc]);
+
+        } else if (plan.action === 'generative-edit' && plan.refinedPrompt) {
+            setGenerationStatus('Generating final variations...');
+            const variationPrompts = [
+                plan.refinedPrompt,
+                `${plan.refinedPrompt} (Try a slightly different, creative style.)`,
+                `${plan.refinedPrompt} (Offer another alternative version.)`,
+            ];
+
+            const newImageSrcs: string[] = [];
+            for (const p of variationPrompts) {
+                 newImageSrcs.push(await editImage(currentSrc, p));
+            }
+            setVariants(newImageSrcs);
+        } else {
+            throw new Error("The AI Analyst returned an invalid plan. Please try a different prompt.");
         }
-        
-        setVariants(newImageSrcs);
 
     } catch (err: any) {
         if (err.message && err.message.includes('quota')) {
